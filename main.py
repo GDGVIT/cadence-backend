@@ -19,6 +19,9 @@ import os
 import pickle
 import shutil
 
+import spotipy
+import spotipy.oauth2 as oauth2
+import yaml
 from snips_nlu import SnipsNLUEngine
 from snips_nlu.dataset import dataset
 from snips_nlu.default_configs import CONFIG_EN
@@ -80,6 +83,67 @@ def detect_intent(nlumodel: SnipsNLUEngine, string: str):
     return {"intent": intent, "slotflag": slotflag, "slots": slots}
 
 
+# Function to get new Spotify Object
+def newSpotifyObject():
+    """
+    This function takes input of a spotify account's Client ID and Client Secret, and creates a new spotify object
+    Parameters required: None
+    Return data: Authenticated Spotify Object (spotipy.client.Spotify)
+    """
+    # Initializing Spotify Credentials
+    with open("creds.yaml") as file:
+        creds = yaml.full_load(file)
+
+    cli_id = creds["spotify client id"]
+    cli_sec = creds["spotify client secret"]
+
+    # Creating spotify auth object to authenticate spotify object
+    auth = oauth2.SpotifyClientCredentials(client_id=cli_id, client_secret=cli_sec)
+    # Get access token from spotify
+    token = auth.get_access_token(as_dict=False)
+    # Create spotify object
+    spotify = spotipy.Spotify(auth=token)
+    # Returning Spotify Object
+    return spotify
+
+
+# Function to get playlist tracks
+def get_playlist_tracks(spotify: spotipy.client.Spotify, playlist_id: str):
+    """
+    This function takes an authenticated Spotify client, and a playlist ID, and returns a list of song IDs of every song in the playlist
+    Parameters required: Authenticated Spotify Client, and playlist ID or URL
+    Return Data: List of song IDs in the playlist
+    """
+    # Get first 100 or lesser songs' details
+    results = spotify.playlist_items(playlist_id)
+    # Check if there are more songs for which details need to be obtained
+    tracks = results["items"]
+    while results["next"]:
+        # Get next 100 songs' details, and append to the list of results already obtained
+        results = spotify.next(results)
+        tracks.extend(results["items"])
+    # Create new list to hold track IDs
+    track_id = []
+    # Extract each track ID from the extracted information, and append to track_id list
+    for i in tracks:
+        if i["track"]["id"] != None:
+            track_id.append("spotify:track:" + i["track"]["id"])
+    # Return all track IDs
+    return track_id
+
+
+# Function to get all features of a given list of song ids
+def get_audio_features(spotify: spotipy.client.Spotify, track_ids: list):
+    # Getting features
+    featurelst = []
+    count = 0
+    while count <= len(track_ids):
+        # Get 100 songs' features at a time. Getting any more will result in bad result error
+        featurelst.extend(spotify.audio_features(track_ids[count : count + 100]))
+        count = count + 100
+    return featurelst
+
+
 def main():
     """
     This is the main function, which starts the main flow of the servers
@@ -97,10 +161,18 @@ def main():
     # In main flow, start firebase listener here
 
     # Testing detect_intent()
-    string = input()
-    output_intent = detect_intent(nluengine, string)
-    print(output_intent)
-    return 0
+    # string = input()
+    # output_intent = detect_intent(nluengine, string)
+    # print(output_intent)
+    # return 0
+
+    # Testing newSpotifyObject()
+    playlist_song_ids = get_playlist_tracks(
+        newSpotifyObject(),
+        "https://open.spotify.com/playlist/3It5BuAucg59mpLzILUS70?si=8MrxgpaWQhmvzLl1sBA_2A",
+    )
+    print(playlist_song_ids)
+    print(get_audio_features(newSpotifyObject(), playlist_song_ids))
 
 
 # Start main function
