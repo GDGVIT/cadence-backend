@@ -19,6 +19,8 @@ import os
 import pickle
 import shutil
 
+import numpy as np
+import pandas as pd
 import spotipy
 import spotipy.oauth2 as oauth2
 import yaml
@@ -26,10 +28,11 @@ from snips_nlu import SnipsNLUEngine
 from snips_nlu.dataset import dataset
 from snips_nlu.default_configs import CONFIG_EN
 from snips_nlu.exceptions import PersistingError
+from xgboost import XGBClassifier
 
 
 # Function to create NLP model
-def create_nlp_model():
+def create_nlp_model() -> SnipsNLUEngine:
     """
     This function trains a new ML model from the given dataset. It then saves the model in the root directory of the project with the file name: nlpumodel
     This function will only be called once, at the start of the program, if nlumodel file is not detected in the current directory
@@ -63,7 +66,7 @@ def create_nlp_model():
 
 
 # Function to detect intent of string
-def detect_intent(nlumodel: SnipsNLUEngine, string: str):
+def detect_intent(nlumodel: SnipsNLUEngine, string: str) -> dict:
     """
     This function detects the intent and the slots a string contains, if it is provided with a trained model and a string
     Parameters required: SnipsNLUEngine object, string
@@ -84,9 +87,9 @@ def detect_intent(nlumodel: SnipsNLUEngine, string: str):
 
 
 # Function to get new Spotify Object
-def newSpotifyObject():
+def newSpotifyObject() -> spotipy.client.Spotify:
     """
-    This function takes input of a spotify account's Client ID and Client Secret, and creates a new spotify object
+    This function creates a new spotify object using the creds.yaml file in the root folder to authenticate the object
     Parameters required: None
     Return data: Authenticated Spotify Object (spotipy.client.Spotify)
     """
@@ -108,11 +111,11 @@ def newSpotifyObject():
 
 
 # Function to get playlist tracks
-def get_playlist_tracks(spotify: spotipy.client.Spotify, playlist_id: str):
+def get_playlist_tracks(spotify: spotipy.client.Spotify, playlist_id: str) -> list:
     """
-    This function takes an authenticated Spotify client, and a playlist ID, and returns a list of song IDs of every song in the playlist
+    This function takes an authenticated Spotify client, and a playlist ID, and returns a list of song details of every song in the playlist
     Parameters required: Authenticated Spotify Client, and playlist ID or URL
-    Return Data: List of song IDs in the playlist
+    Return Data: List of song details in the playlist
     """
     # Get first 100 or lesser songs' details
     results = spotify.playlist_items(playlist_id)
@@ -123,17 +126,38 @@ def get_playlist_tracks(spotify: spotipy.client.Spotify, playlist_id: str):
         results = spotify.next(results)
         tracks.extend(results["items"])
     # Create new list to hold track IDs
-    track_id = []
-    # Extract each track ID from the extracted information, and append to track_id list
-    for i in tracks:
+    track_id = {}
+    # Extract each track detail from the extracted information, and append to track_id list
+    track_id["IDs"] = []
+    track_id["Name"] = []
+    track_id["Artist"] = []
+    track_id["Popularity"] = []
+    for i in tracks:  # Looping through all tracks
         if i["track"]["id"] != None:
-            track_id.append("spotify:track:" + i["track"]["id"])
+            track_id["IDs"].append(
+                "spotify:track:" + i["track"]["id"]
+            )  # Get ID of song
+            track_id["Name"].append(i["track"]["name"])  # Get Name of song
+            track_id["Artist"].append(
+                i["track"]["artists"][0]["name"]
+            )  # Get main Artist of song
+            track_id["Popularity"].append(
+                i["track"]["popularity"]
+            )  # Get popularity of songs
     # Return all track IDs
     return track_id
 
 
 # Function to get all features of a given list of song ids
-def get_audio_features(spotify: spotipy.client.Spotify, track_ids: list):
+def get_audio_features(spotify: spotipy.client.Spotify, track_ids: list) -> list:
+    """
+    This function gets the following features of a spotify song, hundred songs at a time:
+    ["acousticness", "danceability", "durationms", "energy", "instrumentalness", "key", "liveness", "loudness", "mode", "speechiness"\
+        , "tempo", "timesignature", "valence"]
+    Getting more than 100 songs will result in a bad request error
+    Parameters Required: Authenticated Spotify Client, and list of song IDs
+    Return Data: List of dictionary containing song features
+    """
     # Getting features
     featurelst = []
     count = 0
@@ -142,6 +166,188 @@ def get_audio_features(spotify: spotipy.client.Spotify, track_ids: list):
         featurelst.extend(spotify.audio_features(track_ids[count : count + 100]))
         count = count + 100
     return featurelst
+
+
+# Function to create dataset with certain songs
+def create_dataset() -> None:
+    """
+    This function creates a csv file based on urls given below for specific tags. The csv will later be used to create the ML model,
+    which will be used to classify songs into the below tags
+    Tags: ['Study', 'Gym','Yoga','Sleep']
+    Parameters Required: None
+    Return Data: None
+    """
+    # Record of all urls that contribute to a tag
+    playlist_dict = {
+        # "Travel": [
+        #     "https://open.spotify.com/playlist/0yXe2Ok6uWm15lzStDZIyN?si=4q7fe4A3QHGX-gXVCLHuwg",
+        #     "https://open.spotify.com/playlist/4du84WTLemvL4Pp2DAvlby?si=xuE2b2bXQRijycPi9kLlzw",
+        # ],
+        "Study": [
+            "https://open.spotify.com/playlist/0vvXsWCC9xrXsKd4FyS8kM?si=aEAuimj4R8-7encKbkv8lg"
+        ],
+        "Gym": [
+            "https://open.spotify.com/playlist/0L33OqcgnqcdtUDhUAyfPW?si=vSKSLbnZQpig_rnjXmdLAg",
+            "https://open.spotify.com/playlist/0sPiindbOuUlsUevklWtEO?si=D9699hIAR8CejSVGeKO1Cg",
+        ],
+        "Yoga": [
+            "https://open.spotify.com/playlist/37i9dQZF1DX9uKNf5jGX6m?si=W65q_28zT0mkIwuodAQxMQ",
+            "https://open.spotify.com/playlist/59Mv9oVmx1wIQAaOoLWceY?si=Euwj3oZjQs2bugNCH67I1A",
+        ],
+        # "Meetings": [
+        #     "https://open.spotify.com/playlist/4LJ5hkgqt04IKw454SUJqV?si=_BdJz3YlS6-biDd4Kv8Fpw"
+        # ],
+        "Sleep": [
+            "https://open.spotify.com/playlist/21wbvqMl5HNxhfi2cNqsdZ?si=oalBs9Q1TyqoV1InDYeaYA",
+            "https://open.spotify.com/playlist/37i9dQZF1DWYcDQ1hSjOpY?si=cddd6iLKQVei4H4Ko-VAcg",
+        ],
+    }
+    dataset = pd.DataFrame()
+
+    # Iterating through each link to download song information
+    for tag, urls in playlist_dict.items():
+        for url in urls:
+            # Getting all songs' details in a playlist
+            songs = get_playlist_tracks(newSpotifyObject(), url)
+            # Getting song paramenters
+            song_features = get_audio_features(newSpotifyObject(), songs["IDs"])
+            finalsongs = []
+
+            # Combining aquired information into one dictionary
+            for i in range(len(song_features)):
+                # Creating a temporary song dictionary to save info
+                song = {}
+                try:
+                    song.update(song_features[i])
+                    song.update(
+                        {
+                            "Name": songs["Name"][i],
+                            "Artist": songs["Artist"][i],
+                            "Popularity": songs["Popularity"][i],
+                        }
+                    )
+                    song.update({"Tag": tag})
+                    finalsongs.append(song)
+                except:
+                    pass
+            # Appending dictionary to final dataset
+            dataset = dataset.append(finalsongs, ignore_index=True)
+
+    # Dropping duplicates of the dataset
+    dataset = dataset.drop_duplicates(subset=["Name", "Artist"], keep="first")
+    # Saving dataset to csv so it is accessable later
+    dataset.to_csv("dataset.csv")
+
+
+# Function to create ML Model pickle file
+def create_ML_model() -> XGBClassifier:
+    """
+    This function creates an XGBoost Classifier and trains it with 'dataset.csv' in the root directory.
+    It saves the model for future use, and also returns to model to function call
+    Parameters Required: None
+    Return Data: Trained XGBClassifier Object (xgboost.sklearn.XGBClassifier)
+    """
+    # Creating new Model
+    model = XGBClassifier()
+    # Opening and preprocessing dataset
+    dataset = pd.read_csv("dataset.csv")
+    columns_to_be_dropped = [
+        "Unnamed: 0",
+        "type",
+        "id",
+        "uri",
+        "track_href",
+        "analysis_url",
+        "Artist",
+        "Name",
+        "Popularity",
+        "duration_ms",
+    ]
+    # Dropping columns
+    for i in columns_to_be_dropped:
+        if i in dataset.columns:
+            dataset = dataset.drop(i, axis=1)
+    # Setting 'Tag' Column as prediction column
+    Y = dataset["Tag"]
+    # Removing 'Tag' Column for X values
+    X = dataset.drop(["Tag"], axis=1)
+    # Fitting classifier with X and Y
+    model.fit(X, Y)
+    # Saving classifier using pickle to root directory
+    with open("MLModel.pickle", "wb") as handle:
+        pickle.dump(model, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    # Returning model
+    return model
+
+
+# Function to give a dictionary of song properties
+def prep_songs(song_ids: list, spotify: spotipy.client.Spotify) -> pd.DataFrame:
+    """
+    Songs passed with IDs cannot directly be used in the model. This function preps the song for the ML model
+    Parameters Required: List of song ids (from client), authenticated spotify client
+    Return Data: Pandas DataFrame of song details, for which classes can now be predicted
+    """
+    prep_set = []
+    curr_number = 0
+    tracks = []
+    # Get all details of every song passed
+    # Can only do 50 at a time, else throws an error of too many ids passed
+    while curr_number <= len(song_ids):
+        tracks.extend(
+            spotify.tracks(song_ids[curr_number : curr_number + 50])["tracks"]
+        )
+        curr_number += 50
+    # Getting audio features of all songs passed
+    features = get_audio_features(spotify, song_ids)
+    # Combining obtained data into single dictionary
+    for i in range(len(features)):
+        temp_song = features[i]
+        temp_song["Popularity"] = tracks[i]["popularity"]
+        temp_song["Name"] = tracks[i]["name"]
+        temp_song["Artist"] = tracks[i]["artists"][0]["name"]
+        # Adding dictionary to list containing all processed songs
+        prep_set.append(temp_song)
+    # Converting list of dictionaries to a pandas dataframe
+    pred_data = pd.DataFrame(prep_set)
+    # Returning Dataframe
+    return pred_data
+
+
+# Function to predict tags for given songs
+def predict_tag(pred_data: pd.DataFrame, model: XGBClassifier) -> tuple:
+    """
+    This function predicts a tag given a model and the data for which it needs to predict
+    Parameters Required: Prepared data of client song ids, ML model that is pretrained
+    Returned data: Tuple of multiple data
+        Tuple index 0: Predicted probabilites of each song belonging to one class
+        Tuple index 1: List of song ids (in order)
+        Tuple index 2: List of song names (in order)
+        Tuple index 3: List of classes (in order for predicted probabilities)
+    """
+    # Saving names and ids for return
+    names = pred_data["Name"]
+    ids = pred_data["id"]
+    # Preprocessing client input data, dropping unwanted columns
+    columns_to_be_dropped = [
+        "Unnamed: 0",
+        "type",
+        "id",
+        "uri",
+        "track_href",
+        "analysis_url",
+        "Artist",
+        "Name",
+        "Popularity",
+        "duration_ms",
+    ]
+    for i in columns_to_be_dropped:
+        if i in pred_data.columns:
+            pred_data = pred_data.drop(i, axis=1)
+    # Predicting the probability of each song belonging to each class
+    # The highest probability defines its class
+    pred = model.predict_proba(pred_data)
+    # predclass = model.predict(pred_data)
+    return pred, ids, names, model.classes_
 
 
 def main():
@@ -158,7 +364,36 @@ def main():
         nluengine = create_nlp_model()
         print("Trained and loaded new model")
 
-    # In main flow, start firebase listener here
+    # Checking for training dataset
+    if not os.path.isfile("dataset.csv"):
+        # If dataset doesnt exist, create it
+        create_dataset()
+        print("Dataset Created and saved")
+    else:
+        # If dataset exists, proceed
+        print("Dataset Found")
+
+    if not os.path.isfile("MLModel.pickle"):
+        mlmodel = create_ML_model()
+    else:
+        # Model exists, load into program
+        with open("MLModel.pickle", "rb") as handle:
+            mlmodel = pickle.load(handle)
+
+    # Testing model with given playlist
+    predsongs = prep_songs(
+        get_playlist_tracks(
+            newSpotifyObject(),
+            "https://open.spotify.com/playlist/2kUbABZX9A2m0b6fopyouM?si=DX0lgQsmRimAsG1V-oBDrA",
+        )["IDs"],
+        newSpotifyObject(),
+    )
+    ret = predict_tag(predsongs, mlmodel)
+    # Printing classes
+    print(ret[3])
+    # Printing predictions
+    for i in range(len(ret[0])):
+        print(ret[0][i], ret[1][i], ret[2][i])
 
     # Testing detect_intent()
     # string = input()
@@ -166,13 +401,13 @@ def main():
     # print(output_intent)
     # return 0
 
-    # Testing newSpotifyObject()
-    playlist_song_ids = get_playlist_tracks(
-        newSpotifyObject(),
-        "https://open.spotify.com/playlist/3It5BuAucg59mpLzILUS70?si=8MrxgpaWQhmvzLl1sBA_2A",
-    )
-    print(playlist_song_ids)
-    print(get_audio_features(newSpotifyObject(), playlist_song_ids))
+    # Testing newSpotifyObject(), playlist_song_ids(), and get_audio_features()
+    # playlist_song_ids = get_playlist_tracks(
+    #     newSpotifyObject(),
+    #    "https://open.spotify.com/playlist/3It5BuAucg59mpLzILUS70?si=8MrxgpaWQhmvzLl1sBA_2A",
+    # )
+    # print(playlist_song_ids)
+    # print(get_audio_features(newSpotifyObject(), playlist_song_ids))
 
 
 # Start main function
