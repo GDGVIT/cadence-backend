@@ -17,6 +17,7 @@ Flow of the main program:
 
 import os
 import pickle
+import random
 import shutil
 
 import numpy as np
@@ -66,7 +67,7 @@ def create_nlp_model() -> SnipsNLUEngine:
 
 
 # Function to detect intent of string
-def detect_intent(nlumodel: SnipsNLUEngine, string: str) -> dict:
+def detect_intent(string: str) -> dict:
     """
     This function detects the intent and the slots a string contains, if it is provided with a trained model and a string
     Parameters required: SnipsNLUEngine object, string
@@ -74,8 +75,9 @@ def detect_intent(nlumodel: SnipsNLUEngine, string: str) -> dict:
 
     If slots are not detected, slotflag will be returned as False and vice versa
     """
+    global NLUModel
     # Parsing the given string using the pretrained model
-    output = nlumodel.parse(string)
+    output = NLUModel.parse(string)
     # Obtaining intent from parsed string
     intent = output["intent"]["intentName"]
     # Checking for slots
@@ -95,7 +97,7 @@ def newSpotifyObject() -> spotipy.client.Spotify:
     """
     # Initializing Spotify Credentials
     with open("creds.yaml") as file:
-        creds = yaml.full_load(file)
+        creds = yaml.load(file)
 
     cli_id = creds["spotify client id"]
     cli_sec = creds["spotify client secret"]
@@ -293,10 +295,14 @@ def prep_songs(song_ids: list, spotify: spotipy.client.Spotify) -> pd.DataFrame:
     # Get all details of every song passed
     # Can only do 50 at a time, else throws an error of too many ids passed
     while curr_number <= len(song_ids):
-        tracks.extend(
-            spotify.tracks(song_ids[curr_number : curr_number + 50])["tracks"]
-        )
-        curr_number += 50
+        # Checking if it is empty
+        if song_ids[curr_number : curr_number + 50]:
+            tracks.extend(
+                spotify.tracks(song_ids[curr_number : curr_number + 50])["tracks"]
+            )
+            curr_number += 50
+        else:
+            break
     # Getting audio features of all songs passed
     features = get_audio_features(spotify, song_ids)
     # Combining obtained data into single dictionary
@@ -314,7 +320,7 @@ def prep_songs(song_ids: list, spotify: spotipy.client.Spotify) -> pd.DataFrame:
 
 
 # Function to predict tags for given songs
-def predict_tag(pred_data: pd.DataFrame, model: XGBClassifier) -> tuple:
+def predict_tag(pred_data: pd.DataFrame) -> tuple:
     """
     This function predicts a tag given a model and the data for which it needs to predict
     Parameters Required: Prepared data of client song ids, ML model that is pretrained
@@ -324,6 +330,7 @@ def predict_tag(pred_data: pd.DataFrame, model: XGBClassifier) -> tuple:
         Tuple index 2: List of song names (in order)
         Tuple index 3: List of classes (in order for predicted probabilities)
     """
+    global MLModel
     # Saving names and ids for return
     names = pred_data["Name"]
     ids = pred_data["id"]
@@ -345,14 +352,58 @@ def predict_tag(pred_data: pd.DataFrame, model: XGBClassifier) -> tuple:
             pred_data = pred_data.drop(i, axis=1)
     # Predicting the probability of each song belonging to each class
     # The highest probability defines its class
-    pred = model.predict_proba(pred_data)
+    pred = MLModel.predict_proba(pred_data)
     # predclass = model.predict(pred_data)
-    return pred, ids, names, model.classes_
+    return pred, ids, names, MLModel.classes_
 
 
-def main():
+# Function to get top 10 of each tag
+def get_best_match(intent: str, preds: tuple) -> str:
     """
-    This is the main function, which starts the main flow of the servers
+    This funtion takes in predicted intent, and predicted probabilities, and returns the best match for both of them
+    It picks a single song from a range of top 10 best matches
+    Parameters Required: Intent of given prompt, and predicted tuple from predict_tag function
+    Return Data: Single string of song ID
+    """
+    # Get index of required intent to process specific probability
+    if intent not in ["gym", "sleep", "study", "yoga"]:
+        if intent == "reminder":
+            intent = "yoga"
+        elif intent == "travel":
+            intent = "gym"
+        else:
+            intent = "gym"
+    index = list(preds[3]).index(intent.capitalize())
+    combinedlist = []
+    # Combine name, probability and id lists into one list (for easy sorting)
+    for i in range(len(preds[0])):
+        combinedlist.append([preds[0][i], preds[1][i], preds[2][i]])
+
+    # Sort key function to return specific song
+    def sortlst(element):
+        return element[0][index]
+
+    # Sort combined list
+    combinedlist.sort(key=sortlst, reverse=True)
+    # Choose top 10 songs to randomize from
+    listofchosensongs = [i[1] for i in combinedlist[:10]]
+
+    # Names of chosen songs, uncomment to access
+    # nameofsongs = [i[2] for i in combinedlist[:10]]
+
+    final_choice = random.choice(listofchosensongs)
+    return "spotify:track:" + final_choice
+
+
+# Function to verify all major files are present
+def startup() -> tuple:
+    """
+    This function returns the NLU model and the ML model after verifying its presence in the root directory
+    It also creates a trainable dataset if it isnt present in the root directory
+    Parameters Required: None
+    Return data: tuple
+        index 1: NLU Model
+        index 2: ML Model
     """
     # Initializing NLPU
     if os.path.isdir("nlumodel"):
@@ -379,36 +430,78 @@ def main():
         # Model exists, load into program
         with open("MLModel.pickle", "rb") as handle:
             mlmodel = pickle.load(handle)
+    return nluengine, mlmodel
 
-    # Testing model with given playlist
-    predsongs = prep_songs(
-        get_playlist_tracks(
-            newSpotifyObject(),
-            "https://open.spotify.com/playlist/2kUbABZX9A2m0b6fopyouM?si=DX0lgQsmRimAsG1V-oBDrA",
-        )["IDs"],
+
+# Function that is called only when the file is directly run
+def main():
+    """
+    This function is used for testing purposes, and is run only when the main file is run
+    """
+    global NLUModel, MLModel
+    NLUModel, MLModel = startup()
+
+    # Testing all functions
+    phrase = input("Enter a prompt: ")
+    playlist_link = input("Enter a playlist url: ")
+    intent = detect_intent(phrase)["intent"]
+    prepared = prep_songs(
+        get_playlist_tracks(newSpotifyObject(), playlist_link)["IDs"],
         newSpotifyObject(),
     )
-    ret = predict_tag(predsongs, mlmodel)
-    # Printing classes
-    print(ret[3])
-    # Printing predictions
-    for i in range(len(ret[0])):
-        print(ret[0][i], ret[1][i], ret[2][i])
+    ret = predict_tag(prepared)
+    print(get_best_match(intent, ret))
 
-    # Testing detect_intent()
-    # string = input()
-    # output_intent = detect_intent(nluengine, string)
-    # print(output_intent)
-    # return 0
 
-    # Testing newSpotifyObject(), playlist_song_ids(), and get_audio_features()
-    # playlist_song_ids = get_playlist_tracks(
-    #     newSpotifyObject(),
-    #    "https://open.spotify.com/playlist/3It5BuAucg59mpLzILUS70?si=8MrxgpaWQhmvzLl1sBA_2A",
-    # )
-    # print(playlist_song_ids)
-    # print(get_audio_features(newSpotifyObject(), playlist_song_ids))
+# Function called by api to compute best match from playlist
+def apicall_playlist(prompt: str, songlist: str) -> dict:
+    """
+    This function is called when a request with a playlist link is received
+    It runs calls all nesessary functions to finally return the best song choice for the given prompt
+    Parameters required: (sent from received request) given prompt and playlist link
+    Return Data: Dictionary containing best match and detected intent
+    """
+    # Obtain intent
+    intent = detect_intent(prompt)["intent"]
+    # Obtain dataframe of prepared data
+    prepared = prep_songs(
+        get_playlist_tracks(newSpotifyObject(), songlist)["IDs"],
+        newSpotifyObject(),
+    )
+    # Get predicted tags
+    ret = predict_tag(prepared)
+    # Get best match from predicted data and return
+    return {"song": get_best_match(intent, ret), "intent": intent}
+
+
+# Function called by an api to compute best match from list of song IDs
+def apicall_songlist(prompt: str, songlist: str) -> dict:
+    """
+    This function is called when a request with a list of songs is received
+    It runs calls all nesessary functions to finally return the best song choice for the given prompt
+    Parameters required: (sent from received request) given prompt and a list of songs
+    Return Data: Dictionary containing best match and detected intent
+    """
+    # Obtain intent
+    intent = detect_intent(prompt)["intent"]
+    # Create list of songs from a string
+    songs = songlist.split(";")[:-1]
+    # Obtain dataframe of prepared data
+    prepared = prep_songs(
+        songs,
+        newSpotifyObject(),
+    )
+    # Get predicted tags
+    ret = predict_tag(prepared)
+    # Get best match from predicted data and return
+    return {"song": get_best_match(intent, ret), "intent": intent}
 
 
 # Start main function
-main()
+if __name__ == "__main__":
+    # This is only for running tests
+    main()
+else:
+    # Creating Global variables to hold NLU and ML models, as they can be accessed from anywhere
+    global NLUModel, MLModel
+    NLUModel, MLModel = startup()
